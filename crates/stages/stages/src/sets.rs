@@ -53,7 +53,7 @@ use reth_network_p2p::{bodies::downloader::BodyDownloader, headers::downloader::
 use reth_primitives_traits::{Block, NodePrimitives};
 use reth_provider::HeaderSyncGapProvider;
 use reth_prune_types::{PruneMode, PruneModes};
-use reth_stages_api::Stage;
+use reth_stages_api::{Stage, StageId};
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -425,6 +425,11 @@ where
     StorageHashingStage: Stage<Provider>,
 {
     fn builder(self) -> StageSetBuilder<Provider> {
+        // FLATMPT experiment: RETH_FLATMPT_ROOT=1 removes the hashed-state and
+        // trie-table maintenance from the pipeline entirely — an external state
+        // commitment (the flat MPT ExEx, which verifies every chunk's root
+        // against the headers) replaces the Merkle stage.
+        let skip = std::env::var("RETH_FLATMPT_ROOT").as_deref() == Ok("1");
         StageSetBuilder::default()
             .add_stage(MerkleStage::default_unwind())
             .add_stage(AccountHashingStage::new(
@@ -439,6 +444,10 @@ where
                 self.stages_config.merkle.rebuild_threshold,
                 self.stages_config.merkle.incremental_threshold,
             ))
+            .disable_if(StageId::MerkleUnwind, || skip)
+            .disable_if(StageId::AccountHashing, || skip)
+            .disable_if(StageId::StorageHashing, || skip)
+            .disable_if(StageId::MerkleExecute, || skip)
     }
 }
 
