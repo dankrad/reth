@@ -105,6 +105,17 @@ use tracing::{debug, debug_span, error, info, instrument, trace, warn, Level, Sp
 
 pub use crate::tree::types::ValidationOutcome;
 
+/// FLATMPT experiment: with RETH_FLATMPT_ROOT=1 the hashing/merkle stages are
+/// disabled, so after any pipeline backfill the MDBX trie tables are anchored
+/// at an old block and roots computed from them are EXPECTED to differ from
+/// the header. The flat-MPT ExEx verifies every committed block's root
+/// against the header (and aborts on divergence) — it, not the header
+/// comparisons here, is the state commitment gate.
+fn flatmpt_root_mode() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RETH_FLATMPT_ROOT").as_deref() == Ok("1"))
+}
+
 /// Handle to a [`HashedPostState`] computed on a background thread.
 type LazyHashedPostState = reth_tasks::LazyHandle<Arc<HashedPostState>>;
 
@@ -724,7 +735,7 @@ where
                         }
 
                         // we double check the state root here for good measure
-                        if state_root == block.header().state_root() {
+                        if state_root == block.header().state_root() || flatmpt_root_mode() {
                             maybe_state_root = Some((state_root, trie_updates, elapsed))
                         } else {
                             warn!(
@@ -841,17 +852,6 @@ where
         self.metrics
             .record_state_root_gas_bucket(block.header().gas_used(), root_elapsed.as_secs_f64());
         debug!(target: "engine::tree::payload_validator", ?root_elapsed, "Calculated state root");
-
-        // FLATMPT experiment: with RETH_FLATMPT_ROOT=1 the hashing/merkle
-        // stages are disabled, so after any pipeline backfill the MDBX trie
-        // tables are anchored at an old block and the root computed here is
-        // EXPECTED to differ from the header. The flat-MPT ExEx verifies
-        // every committed block's root against the header (and aborts on
-        // divergence), so it, not this check, is the state commitment gate.
-        fn flatmpt_root_mode() -> bool {
-            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-            *ON.get_or_init(|| std::env::var("RETH_FLATMPT_ROOT").as_deref() == Ok("1"))
-        }
 
         // ensure state root matches
         if state_root != block.header().state_root() && flatmpt_root_mode() {
