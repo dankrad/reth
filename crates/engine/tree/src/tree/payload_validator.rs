@@ -105,16 +105,6 @@ use tracing::{debug, debug_span, error, info, instrument, trace, warn, Level, Sp
 
 pub use crate::tree::types::ValidationOutcome;
 
-/// FLATMPT experiment: with RETH_FLATMPT_ROOT=1 the hashing/merkle stages are
-/// disabled, so after any pipeline backfill the MDBX trie tables are anchored
-/// at an old block and roots computed from them are EXPECTED to differ from
-/// the header. The flat-MPT ExEx verifies every committed block's root
-/// against the header (and aborts on divergence) — it, not the header
-/// comparisons here, is the state commitment gate.
-fn flatmpt_root_mode() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RETH_FLATMPT_ROOT").as_deref() == Ok("1"))
-}
 
 /// Handle to a [`HashedPostState`] computed on a background thread.
 type LazyHashedPostState = reth_tasks::LazyHandle<Arc<HashedPostState>>;
@@ -272,7 +262,41 @@ where
             validator,
             changeset_cache,
             runtime,
-            custom_state_root: None,
+            // FLATMPT experiment: under RETH_FLATMPT_ROOT=1 the state root
+            // comes from the flat MPT (optimistic apply + inverse-diff
+            // unwind), with EMPTY trie updates — the frozen MDBX trie tables
+            // are neither read nor written. The header comparison below
+            // stays STRICT: a flat-root mismatch is a real failure.
+            custom_state_root: crate::tree::flat_root::flatmpt_root_mode().then(|| {
+                Arc::new(
+                    |input: CustomStateRootInput<'_, Evm::Primitives>| {
+                        let t = std::time::Instant::now();
+                        let ops =
+                            crate::tree::flat_root::bundle_to_ops(&input.output.state);
+                        let n_ops = ops.len();
+                        let root = crate::tree::flat_root::shadow()
+                            .lock()
+                            .unwrap()
+                            .root_for(
+                                input.block.number(),
+                                input.block.hash(),
+                                input.block.parent_hash(),
+                                ops,
+                            )
+                            .map_err(|e| {
+                                ProviderError::other(std::io::Error::other(format!("{e:#}")))
+                            })?;
+                        debug!(
+                            target: "flatmpt",
+                            block = input.block.number(),
+                            n_ops,
+                            elapsed_us = t.elapsed().as_micros() as u64,
+                            "flat root (engine)"
+                        );
+                        Ok((root, TrieUpdates::default()))
+                    },
+                ) as CustomStateRoot<Evm::Primitives>
+            }),
         }
     }
 
@@ -735,7 +759,7 @@ where
                         }
 
                         // we double check the state root here for good measure
-                        if state_root == block.header().state_root() || flatmpt_root_mode() {
+                        if state_root == block.header().state_root() {
                             maybe_state_root = Some((state_root, trie_updates, elapsed))
                         } else {
                             warn!(
@@ -854,15 +878,7 @@ where
         debug!(target: "engine::tree::payload_validator", ?root_elapsed, "Calculated state root");
 
         // ensure state root matches
-        if state_root != block.header().state_root() && flatmpt_root_mode() {
-            debug!(
-                target: "engine::tree::payload_validator",
-                block = block.header().number(),
-                got = ?state_root,
-                header = ?block.header().state_root(),
-                "accepting header state-root difference (RETH_FLATMPT_ROOT=1; flat ExEx verifies)"
-            );
-        } else if state_root != block.header().state_root() {
+        if state_root != block.header().state_root() {
             #[cfg(feature = "trie-debug")]
             Self::write_trie_debug_recorders(block.header().number(), &trie_debug_recorders);
 

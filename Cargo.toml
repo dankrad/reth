@@ -315,6 +315,7 @@ codegen-units = 1
 incremental = false
 
 [workspace.dependencies]
+mpt-flat-poc = { path = "/home/ubuntu/repos/mpt-flat-poc-reth" }
 # reth
 reth = { path = "bin/reth" }
 reth-storage-rpc-provider = { path = "crates/storage/rpc-provider" }

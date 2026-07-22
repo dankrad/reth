@@ -51,6 +51,7 @@ use tracing::*;
 
 mod block_buffer;
 pub mod error;
+pub mod flat_root;
 pub mod instrumented_state;
 mod invalid_headers;
 mod metrics;
