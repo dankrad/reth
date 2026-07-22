@@ -199,6 +199,7 @@ impl FlatShadowLite {
         } else if first != self.height + 1 {
             anyhow::bail!("gap: committed {first}..={tip}, shadow at {}", self.height);
         }
+        let applied_from = self.height + 1;
         let (root, inverse) = self.db.apply_block(ops)?;
         self.height = tip;
         self.head_hash = tip_hash;
@@ -206,7 +207,10 @@ impl FlatShadowLite {
         self.applied.insert(tip, (tip_hash, inverse));
         self.applied.retain(|n, _| *n + INVERSE_WINDOW > tip);
         self.memo.insert(tip_hash, B256::from(root));
-        self.blocks_since_persist += 1;
+        // Count BLOCKS, not notifications: backfill chunks cover hundreds of
+        // blocks each, and shutdown drops the ExEx future before any final
+        // persist — the periodic cadence is the only durable checkpoint.
+        self.blocks_since_persist += tip - applied_from + 1;
         if self.blocks_since_persist >= PERSIST_EVERY {
             self.persist()?;
             self.blocks_since_persist = 0;
