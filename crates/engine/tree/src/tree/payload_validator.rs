@@ -842,8 +842,27 @@ where
             .record_state_root_gas_bucket(block.header().gas_used(), root_elapsed.as_secs_f64());
         debug!(target: "engine::tree::payload_validator", ?root_elapsed, "Calculated state root");
 
+        // FLATMPT experiment: with RETH_FLATMPT_ROOT=1 the hashing/merkle
+        // stages are disabled, so after any pipeline backfill the MDBX trie
+        // tables are anchored at an old block and the root computed here is
+        // EXPECTED to differ from the header. The flat-MPT ExEx verifies
+        // every committed block's root against the header (and aborts on
+        // divergence), so it, not this check, is the state commitment gate.
+        fn flatmpt_root_mode() -> bool {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            *ON.get_or_init(|| std::env::var("RETH_FLATMPT_ROOT").as_deref() == Ok("1"))
+        }
+
         // ensure state root matches
-        if state_root != block.header().state_root() {
+        if state_root != block.header().state_root() && flatmpt_root_mode() {
+            debug!(
+                target: "engine::tree::payload_validator",
+                block = block.header().number(),
+                got = ?state_root,
+                header = ?block.header().state_root(),
+                "accepting header state-root difference (RETH_FLATMPT_ROOT=1; flat ExEx verifies)"
+            );
+        } else if state_root != block.header().state_root() {
             #[cfg(feature = "trie-debug")]
             Self::write_trie_debug_recorders(block.header().number(), &trie_debug_recorders);
 
