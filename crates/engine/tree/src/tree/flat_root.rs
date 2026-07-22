@@ -65,6 +65,22 @@ impl FlatShadowLite {
             .next()
             .and_then(|s| s.parse().ok())
             .ok_or_else(|| anyhow::anyhow!("{path}.height needs \"<number> <hash>\""))?;
+        // Third field (new format): the flat root at checkpoint time. A
+        // mismatch means the file and the checkpoint tore apart (kill -9
+        // between persist and height write, or a divergence persisted) —
+        // replaying from the stale height onto a future state is NOT
+        // idempotent, so fail loudly instead of corrupting.
+        if let Some(root) = it.next() {
+            let want: B256 = root
+                .parse()
+                .map_err(|_| anyhow::anyhow!("bad root field in {path}.height"))?;
+            let have = B256::from(db.root());
+            if want != have && std::env::var("FLATMPT_HEAL").as_deref() != Ok("1") {
+                anyhow::bail!(
+                    "flat file root {have} != checkpoint root {want} at block {height} — torn checkpoint;                      set FLATMPT_HEAL=1 to converge by replaying forward"
+                );
+            }
+        }
         tracing::info!(target: "flatmpt", height, %head_hash, "flat shadow (engine) opened");
         Ok(Self {
             db,
@@ -81,7 +97,7 @@ impl FlatShadowLite {
         self.db.persist()?;
         std::fs::write(
             format!("{}.height", self.path),
-            format!("{} {}\n", self.height, self.head_hash),
+            format!("{} {} {}\n", self.height, self.head_hash, B256::from(self.db.root())),
         )?;
         Ok(())
     }
