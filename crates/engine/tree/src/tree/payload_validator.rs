@@ -274,18 +274,48 @@ where
                         let ops =
                             crate::tree::flat_root::bundle_to_ops(&input.output.state);
                         let n_ops = ops.len();
-                        let root = crate::tree::flat_root::shadow()
-                            .lock()
-                            .unwrap()
-                            .root_for(
-                                input.block.number(),
-                                input.block.hash(),
-                                input.block.parent_hash(),
-                                ops,
-                            )
-                            .map_err(|e| {
-                                ProviderError::other(std::io::Error::other(format!("{e:#}")))
-                            })?;
+                        // Startup race: the node's canonical head can be ahead
+                        // of the shadow checkpoint (the ExEx backfill closes
+                        // that gap concurrently). Live candidates arriving in
+                        // the meantime must WAIT for the shadow to catch up —
+                        // bailing here is fatal to the engine.
+                        let number = input.block.number();
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_secs(1800);
+                        let root = loop {
+                            let mut sh = crate::tree::flat_root::shadow().lock().unwrap();
+                            if number <= sh.height() + 1 {
+                                break sh
+                                    .root_for(
+                                        number,
+                                        input.block.hash(),
+                                        input.block.parent_hash(),
+                                        ops,
+                                    )
+                                    .map_err(|e| {
+                                        ProviderError::other(std::io::Error::other(format!(
+                                            "{e:#}"
+                                        )))
+                                    })?;
+                            }
+                            let h = sh.height();
+                            drop(sh);
+                            if std::time::Instant::now() > deadline {
+                                return Err(ProviderError::other(std::io::Error::other(
+                                    format!(
+                                        "flat shadow stuck at {h}, candidate {number} timed \
+                                         out waiting for backfill"
+                                    ),
+                                )));
+                            }
+                            tracing::info!(
+                                target: "flatmpt",
+                                shadow = h,
+                                candidate = number,
+                                "flat root waiting for shadow backfill"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(1000));
+                        };
                         debug!(
                             target: "flatmpt",
                             block = input.block.number(),
