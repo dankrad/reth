@@ -32,8 +32,80 @@ pub fn flatmpt_root_mode() -> bool {
 pub fn shadow() -> &'static Mutex<FlatShadowLite> {
     static S: OnceLock<Mutex<FlatShadowLite>> = OnceLock::new();
     S.get_or_init(|| {
-        Mutex::new(FlatShadowLite::open().expect("FLATMPT flat shadow failed to open"))
+        let s = Mutex::new(FlatShadowLite::open().expect("FLATMPT flat shadow failed to open"));
+        spawn_bg_gc();
+        s
     })
+}
+
+/// Background GC (tempo's collect/install split, eth-sized): collect victim
+/// regions against a pinned snapshot without holding the shadow lock, then
+/// briefly re-lock to verify+install. Mainnet's 12s cadence leaves the lock
+/// idle almost always; try_lock keeps gc strictly off the apply path.
+/// `FLATMPT_BG_GC=0` disables; `FLATMPT_GC_CHUNK` regions/cycle (default 512).
+fn spawn_bg_gc() {
+    if std::env::var("FLATMPT_BG_GC").as_deref() == Ok("0") {
+        return;
+    }
+    let chunk: usize = std::env::var("FLATMPT_GC_CHUNK")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512);
+    std::thread::Builder::new()
+        .name("flatmpt-gc".into())
+        .spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let snap = match shadow().try_lock() {
+                Ok(g) => g.db.snapshot(),
+                Err(_) => continue,
+            };
+            let t_collect = std::time::Instant::now();
+            let batch = match snap.gc_collect(chunk) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(target: "flatmpt", err = %format!("{e:#}"), "bg gc collect failed");
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    continue;
+                }
+            };
+            if batch.is_empty() {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                continue;
+            }
+            let collect_ms = t_collect.elapsed().as_millis() as u64;
+            let (items, regions) = (batch.len(), batch.regions());
+            // Install in the next idle moment; the batch's snapshot pin keeps
+            // it sound while we wait. Give up after 30s (dropped batch =
+            // wasted relocation writes, never wrong data).
+            let mut batch = Some(batch);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while let Some(b) = batch.take() {
+                match shadow().try_lock() {
+                    Ok(mut g) => match g.db.gc_install(b) {
+                        Ok((installed, discarded)) => {
+                            g.db.prefetch_clear(); // release staged regions
+                            tracing::debug!(
+                                target: "flatmpt",
+                                regions, items, installed, discarded, collect_ms,
+                                "bg gc cycle"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(target: "flatmpt", err = %format!("{e:#}"), "bg gc install failed")
+                        }
+                    },
+                    Err(_) => {
+                        if std::time::Instant::now() < deadline {
+                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            batch = Some(b);
+                        } else {
+                            tracing::debug!(target: "flatmpt", regions, items, "bg gc batch dropped (lock busy)");
+                        }
+                    }
+                }
+            }
+        })
+        .expect("spawn flatmpt-gc");
 }
 
 pub struct FlatShadowLite {
