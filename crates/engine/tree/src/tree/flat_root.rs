@@ -225,7 +225,22 @@ impl FlatShadowLite {
                 self.head_hash
             );
         }
+        let n_ops = ops.len();
+        let t_apply = std::time::Instant::now();
         let (root, inverse) = self.db.apply_block(ops)?;
+        let apply_us = t_apply.elapsed().as_micros() as u64;
+        tracing::info!(target: "flatmpt", block = number, n_ops, apply_us, "flat root (engine)");
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("{}.livetimings", self.path))
+        {
+            use std::io::Write as _;
+            let _ = writeln!(
+                f,
+                "{{\"block\":{number},\"n_ops\":{n_ops},\"apply_us\":{apply_us}}}"
+            );
+        }
         self.height = number;
         self.head_hash = hash;
         self.applied.insert(number, (hash, inverse));
