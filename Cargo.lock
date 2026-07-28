@@ -6042,6 +6042,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fafa6961cabd9c63bcd77a45d7e3b7f3b552b70417831fb0f56db717e72407e"
 
 [[package]]
+name = "mpt-flat-poc"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "alloy-rlp",
+ "anyhow",
+ "bincode",
+ "libc",
+ "serde",
+ "sha3 0.10.8",
+ "tempfile",
+]
+
+[[package]]
 name = "multiaddr"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8269,6 +8283,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-rpc-types-engine",
+ "anyhow",
  "assert_matches",
  "crossbeam-channel",
  "derive_more",
@@ -8278,6 +8293,7 @@ dependencies = [
  "metrics",
  "metrics-util",
  "moka",
+ "mpt-flat-poc",
  "parking_lot",
  "proptest",
  "rand 0.8.6",
